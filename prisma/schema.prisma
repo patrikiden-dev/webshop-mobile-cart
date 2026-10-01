@@ -1,0 +1,260 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// Get a free hosted Postgres database in seconds: `npx create-sku`
+/**
+ * Prisma's built-in search (preview, quick, limited)
+ * In Prisma 7 this is still a preview feature — Prisma Client supports full-text search for MySQL and for PostgreSQL
+ * with the fullTextSearchPostgres preview feature.
+ * const posts = await prisma.post.findMany({
+ * where: { content: { search: "prisma | postgres" } },
+ * orderBy: {
+ * _relevance: { fields: ["title"], search: "prisma", sort: "desc" },
+ * },
+ * });
+ * Prisma Client does not currently support using indexes to speed up full text search on Postgres. So this works
+ * fine on a small table but does a sequential scan with to_tsvector() computed on the fly for every row on every
+ * query — not something you want once you have more than a few thousand posts
+ */
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Category {
+  id       Int       @id
+  name     String
+  slug     String    @unique
+  products Product[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([name])
+  @@map("categories")
+}
+
+model Product {
+  id          String  @id @default(uuid()) @db.Uuid
+  slug        String  @unique
+  title       String
+  description String
+  price       Decimal @db.Decimal(10, 2)
+
+  categoryId Int
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  stock     Int      @default(0)
+  brand     String?
+  sku       String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderItems OrderItem[]
+
+  @@index([categoryId])
+  @@index([brand])
+  @@index([createdAt])
+  @@index([title])
+  @@map("products")
+}
+
+enum OrderStatus {
+  PENDING // created, awaiting payment
+  PAID
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+
+  @@map("order_status")
+}
+
+enum PaymentStatus {
+  UNPAID
+  PROCESSING
+  PAID
+  FAILED
+  PARTIALLY_REFUNDED
+  REFUNDED
+
+  @@map("payment_status")
+}
+
+enum AddressType {
+  SHIPPING
+  BILLING
+
+  @@map("address_type")
+}
+
+model Order {
+  id          String @id @default(uuid()) @db.Uuid
+  orderNumber Int    @unique @default(autoincrement()) // human-friendly number for emails/support
+
+  // Supabase auth.users.id. No FK, since auth schema is managed by Supabase.
+  // Nullable to allow guest checkout.
+  userId String? @db.Uuid
+  email  String
+
+  status        OrderStatus   @default(PENDING)
+  paymentStatus PaymentStatus @default(UNPAID)
+  currency      String        @default("eur") @db.VarChar(3) // lowercase ISO code, like Stripe
+
+  subtotal      Decimal @db.Decimal(10, 2)
+  shippingTotal Decimal @default(0) @db.Decimal(10, 2)
+  taxTotal      Decimal @default(0) @db.Decimal(10, 2)
+  discountTotal Decimal @default(0) @db.Decimal(10, 2)
+  total         Decimal @db.Decimal(10, 2)
+
+  // Stripe
+  stripeCustomerId        String?
+  stripeCheckoutSessionId String?   @unique
+  stripePaymentIntentId   String?   @unique
+  stripeChargeId          String?
+  paidAt                  DateTime?
+  refundedAt              DateTime?
+
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items     OrderItem[]
+  addresses OrderAddress[]
+
+  @@index([userId])
+  @@index([email])
+  @@index([status])
+  @@index([paymentStatus])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id      String @id @default(uuid()) @db.Uuid
+  orderId String @db.Uuid
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // SetNull so deleting a product never deletes order history
+  productId String?  @db.Uuid
+  product   Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  // Snapshot of product data at time of purchase
+  title     String
+  sku       String
+  unitPrice Decimal @db.Decimal(10, 2)
+  quantity  Int
+  lineTotal Decimal @db.Decimal(10, 2) // unitPrice * quantity
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+  @@index([productId])
+  @@map("order_items")
+}
+
+model OrderAddress {
+  id      String      @id @default(uuid()) @db.Uuid
+  orderId String      @db.Uuid
+  order   Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  type    AddressType
+
+  fullName   String
+  company    String?
+  line1      String
+  line2      String?
+  city       String
+  state      String?
+  postalCode String
+  country    String  @db.VarChar(2) // ISO 3166-1 alpha-2
+  phone      String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([orderId, type]) // one shipping + one billing per order
+  @@map("order_addresses")
+}
+
+// Stripe webhook idempotency: insert event.id first, skip if it already exists
+model StripeEvent {
+  id          String   @id // Stripe event id, e.g. evt_...
+  type        String
+  processedAt DateTime @default(now())
+
+  @@map("stripe_events")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id            String   @id
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  role          Role     @default(USER)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sessions Session[]
+  accounts Account[]
+
+  @@index([role])
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String    @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime?
+  updatedAt  DateTime?
+
+  @@index([identifier])
+  @@map("verification")
+}
